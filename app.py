@@ -141,7 +141,7 @@ def home():
       <div class="header">
         <div>
           <h1>Trypsin Estimator</h1>
-          <p class="sub">Upload a grid image to get <b>darkness %</b> based on dark spots on the grid.</p>
+          <p class="sub">Upload a grid image pair to get <b>darkness % vs your own baseline</b> based on dark spots on the inner grid.</p>
         </div>
         <div class="links">
           <a class="chip" href="/docs">API Docs</a>
@@ -159,7 +159,8 @@ def home():
             <div id="drop" class="drop">
               <div class="row">
                 <label class="btn" for="file">Choose file</label>
-                <button id="analyze" class="btn primary" disabled>Analyze</button>
+                <button id="analyzeBaseline" class="btn" disabled>Analyze as baseline</button>
+                <button id="analyzeSample" class="btn primary" disabled>Analyze sample vs baseline</button>
                 <button id="clear" class="btn" disabled>Clear</button>
                 <input id="file" type="file" accept="image/*" />
               </div>
@@ -185,12 +186,14 @@ def home():
           <div class="inner result">
             <p class="title">Result</p>
             <div class="box">
-              <p class="label">Darkness</p>
+              <p class="label">Sample vs baseline</p>
               <div class="big"><span id="darkness">—</span><span style="font-size:18px;font-weight:650;color:var(--muted)">%</span></div>
               <div class="bar"><div id="barFill"></div></div>
               <div style="height:10px"></div>
               <div class="kv">
-                <div class="k">Fraction</div><div class="v" id="fraction">—</div>
+                <div class="k">Baseline darkness</div><div class="v" id="baseline">—</div>
+                <div class="k">Sample darkness (raw)</div><div class="v" id="fraction">—</div>
+                <div class="k">Sample vs baseline</div><div class="v" id="relative">—</div>
                 <div class="k">Trypsin (placeholder)</div><div class="v" id="trypsin">—</div>
                 <div class="k">Notes</div><div class="v" id="notes">Upload an image to begin.</div>
               </div>
@@ -206,7 +209,8 @@ def home():
     <script>
       const fileInput = document.getElementById('file');
       const drop = document.getElementById('drop');
-      const analyzeBtn = document.getElementById('analyze');
+      const analyzeBaselineBtn = document.getElementById('analyzeBaseline');
+      const analyzeSampleBtn = document.getElementById('analyzeSample');
       const clearBtn = document.getElementById('clear');
       const fileMeta = document.getElementById('fileMeta');
       const statusEl = document.getElementById('status');
@@ -215,11 +219,14 @@ def home():
 
       const darknessEl = document.getElementById('darkness');
       const fractionEl = document.getElementById('fraction');
+      const baselineEl = document.getElementById('baseline');
+      const relativeEl = document.getElementById('relative');
       const trypsinEl = document.getElementById('trypsin');
       const notesEl = document.getElementById('notes');
       const barFill = document.getElementById('barFill');
 
-      let currentFile = null;
+      let currentFile = null;      // currently selected file (used as baseline *or* sample)
+      let baselineFile = null;     // stored baseline image file
 
       function setStatus(text, kind){
         statusEl.textContent = text || '';
@@ -229,23 +236,32 @@ def home():
       function resetResult(){
         darknessEl.textContent = '—';
         fractionEl.textContent = '—';
+        baselineEl.textContent = '—';
+        relativeEl.textContent = '—';
         trypsinEl.textContent = '—';
-        notesEl.textContent = 'Upload an image to begin.';
+        notesEl.textContent = 'Step 1: upload a clear grid and set it as baseline. Step 2: upload a sample image with trypsin and analyze vs baseline.';
         barFill.style.width = '0%';
       }
 
       function setFile(file){
         currentFile = file || null;
-        analyzeBtn.disabled = !currentFile;
-        clearBtn.disabled = !currentFile;
+        analyzeBaselineBtn.disabled = !currentFile;
+        // sample analysis additionally requires a saved baseline
+        analyzeSampleBtn.disabled = !currentFile || !baselineFile;
+        clearBtn.disabled = !currentFile && !baselineFile;
 
         if(!currentFile){
-          fileMeta.textContent = 'No file selected.';
+          fileMeta.textContent = baselineFile ? 'No sample selected. Baseline is set.' : 'No file selected.';
           imgPreview.style.display = 'none';
           placeholder.style.display = 'block';
           imgPreview.src = '';
           setStatus('', '');
           resetResult();
+          if(baselineFile){
+            baselineEl.textContent = '0.00';
+            relativeEl.textContent = '—';
+            notesEl.textContent = 'Baseline is set. Upload a sample image and analyze vs baseline.';
+          }
           return;
         }
 
@@ -257,7 +273,7 @@ def home():
         imgPreview.src = url;
         imgPreview.style.display = 'block';
         placeholder.style.display = 'none';
-        setStatus('Ready to analyze.', 'ok');
+        setStatus('Ready to analyze as baseline or sample.', 'ok');
       }
 
       fileInput.addEventListener('change', (e) => {
@@ -267,7 +283,11 @@ def home():
 
       clearBtn.addEventListener('click', () => {
         fileInput.value = '';
+        currentFile = null;
+        baselineFile = null;
         setFile(null);
+        resetResult();
+        setStatus('Cleared baseline and sample.', '');
       });
 
       // Drag & drop
@@ -284,45 +304,76 @@ def home():
         if(f) setFile(f);
       });
 
-      analyzeBtn.addEventListener('click', async () => {
+      // Step 1: user chooses a clear grid image and marks it as baseline.
+      analyzeBaselineBtn.addEventListener('click', () => {
         if(!currentFile) return;
-        setStatus('Analyzing…', '');
-        analyzeBtn.disabled = true;
+        baselineFile = currentFile;
+        baselineEl.textContent = '0.00';
+        relativeEl.textContent = '—';
+        barFill.style.width = '0%';
+        notesEl.textContent = 'Baseline saved (treated as 0% darkness). Now choose a sample image (with trypsin) and analyze vs baseline.';
+        setStatus('Baseline saved locally. It will be compared pixel‑by‑pixel when you analyze a sample.', 'ok');
+        analyzeSampleBtn.disabled = !currentFile; // now enabled if a sample is present
+      });
+
+      // Step 2: user uploads a sample and we send baseline + sample together.
+      analyzeSampleBtn.addEventListener('click', async () => {
+        if(!currentFile || !baselineFile){
+          setStatus('You need to set a baseline first, then choose a sample.', 'err');
+          return;
+        }
+        setStatus('Analyzing sample vs baseline…', '');
+        analyzeSampleBtn.disabled = true;
 
         try{
           const fd = new FormData();
-          fd.append('file', currentFile);
+          fd.append('baseline', baselineFile);
+          fd.append('sample', currentFile);
 
-          const res = await fetch('/predict', { method: 'POST', body: fd });
+          const res = await fetch('/predict_pair', { method: 'POST', body: fd });
           const data = await res.json().catch(() => ({}));
 
           if(!res.ok || data.error){
             const msg = data.error || `Request failed (${res.status})`;
             setStatus(msg, 'err');
-            analyzeBtn.disabled = false;
+            analyzeSampleBtn.disabled = false;
             return;
           }
 
-          const pct = typeof data.darkness_percent === 'number' ? data.darkness_percent : null;
-          const frac = typeof data.darkness_fraction === 'number' ? data.darkness_fraction : null;
+          const basePct = data.baseline_darkness_percent;
+          const baseFrac = data.baseline_darkness_fraction;
+          const samplePct = data.sample_darkness_percent;
+          const sampleFrac = data.sample_darkness_fraction;
+          const relPct = data.relative_darkness_percent;
+          const relFrac = data.relative_darkness_fraction;
 
-          if(pct === null || frac === null){
+          if(
+            typeof samplePct !== 'number' ||
+            typeof sampleFrac !== 'number' ||
+            typeof relPct !== 'number' ||
+            typeof relFrac !== 'number'
+          ){
             setStatus('Unexpected response format from server.', 'err');
-            analyzeBtn.disabled = false;
+            analyzeSampleBtn.disabled = false;
             return;
           }
 
-          const pctClamped = Math.max(0, Math.min(100, pct));
-          darknessEl.textContent = pctClamped.toFixed(2);
-          fractionEl.textContent = frac.toFixed(6);
+          const clampedSamplePct = Math.max(0, Math.min(100, samplePct));
+          const clampedRelPct = Math.max(0, Math.min(100, relPct));
+
+          // Top metric and bar show the relative (sample vs baseline) darkness.
+          darknessEl.textContent = clampedRelPct.toFixed(2);
+          fractionEl.textContent = sampleFrac.toFixed(6);
+          baselineEl.textContent = (typeof basePct === 'number' ? basePct : 0).toFixed(2);
+          relativeEl.textContent = clampedRelPct.toFixed(2);
           trypsinEl.textContent = (typeof data.trypsin_estimate === 'number') ? data.trypsin_estimate.toFixed(6) : String(data.trypsin_estimate);
-          notesEl.textContent = data.notes || '';
-          barFill.style.width = pctClamped + '%';
-          setStatus('Done.', 'ok');
+          notesEl.textContent = data.notes || 'Relative darkness is based only on pixels that became darker than the baseline inside the inner grid.';
+          barFill.style.width = clampedRelPct + '%';
+          setStatus('Sample analyzed vs baseline.', 'ok');
         }catch(err){
-          setStatus(err?.message || 'Failed to analyze image.', 'err');
+          setStatus(err?.message || 'Failed to analyze sample vs baseline.', 'err');
         }finally{
-          analyzeBtn.disabled = !currentFile;
+          analyzeSampleBtn.disabled = false;
         }
       });
     </script>
@@ -336,55 +387,167 @@ def home():
 CAL_A = 120.0
 CAL_B = 0.0
 
+
+def _extract_grid_region(img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Extract the inner circular grid region as (crop_gray, mask).
+
+    - crop_gray: grayscale crop roughly around the grid
+    - mask: boolean array (same shape as crop_gray) where True marks
+      pixels inside the detected circular grid.
+
+    If circle detection fails, falls back to a simple center crop with
+    a circular mask, still focusing on the inner region.
+    """
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    # Start from a center crop to reduce noise from the outer area.
+    y1, y2 = int(0.25 * h), int(0.75 * h)
+    x1, x2 = int(0.25 * w), int(0.75 * w)
+    crop = gray[y1:y2, x1:x2]
+    ch, cw = crop.shape
+
+    # Default: center circle mask in the crop.
+    cy, cx = ch // 2, cw // 2
+    r = min(ch, cw) * 0.35
+    yy, xx = np.ogrid[:ch, :cw]
+    base_mask = (yy - cy) ** 2 + (xx - cx) ** 2 <= r ** 2
+
+    # Try to refine using Hough circle detection on the crop.
+    try:
+        blur = cv2.medianBlur(crop, 5)
+        circles = cv2.HoughCircles(
+            blur,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=min(ch, cw) / 2,
+            param1=80,
+            param2=20,
+            minRadius=int(min(ch, cw) * 0.25),
+            maxRadius=int(min(ch, cw) * 0.45),
+        )
+        if circles is not None:
+            circles = np.round(circles[0, :]).astype(int)
+            c_x, c_y, c_r = circles[0]
+            # Slightly shrink the radius to avoid the bright outer ring.
+            c_r = int(c_r * 0.9)
+            yy2, xx2 = np.ogrid[:ch, :cw]
+            mask = (yy2 - c_y) ** 2 + (xx2 - c_x) ** 2 <= c_r ** 2
+            return crop, mask
+    except Exception:
+        # Fall back gracefully if anything goes wrong.
+        pass
+
+    return crop, base_mask
+
+
 def estimate_darkness(img_bgr: np.ndarray) -> float:
     """
-    Compute how much of the grid area is occupied by dark spots.
+    Single-image darkness estimate for the inner grid.
 
-    Returns:
-        darkness_fraction in [0, 1], where:
-        - 0   = clean grid (no dark spots)
-        - 1   = grid fully covered by dark spots
+    This is mostly for debugging. The preferred, grid-line‑invariant
+    metric is the relative darkness returned by compare_baseline_and_sample.
     """
-    # 1) Convert to grayscale for intensity analysis
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-
-    # 2) Focus on the central grid region only (tight center crop)
-    h, w = gray.shape
-    y1, y2 = int(0.3 * h), int(0.7 * h)
-    x1, x2 = int(0.3 * w), int(0.7 * w)
-    crop = gray[y1:y2, x1:x2]
-
+    crop, mask = _extract_grid_region(img_bgr)
     if crop.size == 0:
         return 0.0
 
-    # 3) Slight blur to reduce sensor noise
     crop_blur = cv2.GaussianBlur(crop, (5, 5), 0)
+    roi = crop_blur[mask]
+    if roi.size == 0:
+        return 0.0
 
-    # 4) Estimate the "clean grid" brightness from the bright pixels.
-    #    On a clean grid, almost all pixels are bright and similar.
-    #    Dark spots show up as a tail of darker pixels.
-    bright_percentile = np.percentile(crop_blur, 90)  # background level
-    std_estimate = np.std(crop_blur)
-
-    # Threshold that defines a "dark spot" pixel
-    # Anything significantly darker than the bright background is counted.
-    threshold = bright_percentile - 1.5 * std_estimate
+    # Use the bright end of the histogram as a reference background.
+    bright_percentile = np.percentile(roi, 95)
+    std_estimate = np.std(roi)
+    threshold = bright_percentile - 2.0 * std_estimate
     threshold = max(threshold, 0.0)
 
-    # 5) Count dark pixels within the grid crop
-    dark_mask = crop_blur < threshold
+    dark_mask = (crop_blur < threshold) & mask
     dark_pixels = int(np.count_nonzero(dark_mask))
-    total_pixels = int(crop_blur.size)
-
+    total_pixels = int(np.count_nonzero(mask))
     if total_pixels == 0:
         return 0.0
 
-    darkness_fraction = dark_pixels / total_pixels  # 0..1
+    darkness_fraction = dark_pixels / total_pixels
     return float(np.clip(darkness_fraction, 0.0, 1.0))
+
+
+def compare_baseline_and_sample(
+    baseline_bgr: np.ndarray, sample_bgr: np.ndarray
+) -> float:
+    """
+    Compute relative darkness between a baseline (clear grid) and a sample.
+
+    Uses only the inner circular grid region and focuses on pixels that
+    become darker in the sample than in the baseline, which helps ignore
+    the regular grid lines that appear in both images.
+    """
+    base_crop, base_mask = _extract_grid_region(baseline_bgr)
+    sample_crop, sample_mask = _extract_grid_region(sample_bgr)
+
+    if base_crop.size == 0 or sample_crop.size == 0:
+        return 0.0
+
+    # Resize to common size in case framing changed slightly between shots.
+    h = min(base_crop.shape[0], sample_crop.shape[0])
+    w = min(base_crop.shape[1], sample_crop.shape[1])
+    if h <= 0 or w <= 0:
+        return 0.0
+
+    base = cv2.resize(base_crop, (w, h), interpolation=cv2.INTER_AREA)
+    sample = cv2.resize(sample_crop, (w, h), interpolation=cv2.INTER_AREA)
+
+    bmask = cv2.resize(
+        base_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+    ).astype(bool)
+    smask = cv2.resize(
+        sample_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+    ).astype(bool)
+    region_mask = bmask & smask
+    if not np.any(region_mask):
+        return 0.0
+
+    base_blur = cv2.GaussianBlur(base, (5, 5), 0)
+    sample_blur = cv2.GaussianBlur(sample, (5, 5), 0)
+
+    # Positive difference = pixels that became darker compared to baseline.
+    delta = base_blur.astype(np.float32) - sample_blur.astype(np.float32)
+    delta[delta < 0] = 0.0
+
+    # Apply inner-grid mask.
+    delta_masked = delta[region_mask]
+    if delta_masked.size == 0:
+        return 0.0
+
+    positive = delta_masked[delta_masked > 0]
+    if positive.size == 0:
+        return 0.0
+
+    # Threshold on the distribution of positive deltas to ignore tiny fluctuations.
+    mean_delta = float(np.mean(positive))
+    std_delta = float(np.std(positive))
+    threshold = max(mean_delta + 0.5 * std_delta, float(np.percentile(positive, 70)))
+
+    strong = delta_masked >= threshold
+    if not np.any(strong):
+        return 0.0
+
+    # Fraction of inner‑grid pixels that significantly darkened
+    dark_pixels = int(np.count_nonzero(strong))
+    total_pixels = int(delta_masked.size)
+    if total_pixels == 0:
+        return 0.0
+
+    rel_fraction = dark_pixels / total_pixels  # 0..1
+    return float(np.clip(rel_fraction, 0.0, 1.0))
+
 
 def darkness_to_trypsin(darkness: float) -> float:
     # Placeholder linear calibration
     return CAL_A * darkness + CAL_B
+
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
@@ -403,5 +566,48 @@ async def predict(file: UploadFile = File(...)):
         "darkness_percent": round(darkness * 100.0, 2),
         "trypsin_estimate": trypsin,
         "units": "YOUR_UNITS_HERE",
-        "notes": "Darkness is based only on the central grid. Calibration is placeholder until you fit to your standards."
+        "notes": "Darkness is based only on the central grid. Calibration is placeholder until you fit to your standards.",
+    }
+
+
+@app.post("/predict_pair")
+async def predict_pair(
+    baseline: UploadFile = File(...),
+    sample: UploadFile = File(...),
+):
+    """
+    Compare a baseline (clear grid) image and a sample (with trypsin).
+
+    - Baseline is treated as 0% darkness by definition.
+    - Relative darkness only counts pixels inside the inner grid that
+      became darker than baseline, largely ignoring the regular grid lines.
+    """
+    base_data = await baseline.read()
+    sample_data = await sample.read()
+
+    base_arr = np.frombuffer(base_data, np.uint8)
+    sample_arr = np.frombuffer(sample_data, np.uint8)
+    base_img = cv2.imdecode(base_arr, cv2.IMREAD_COLOR)
+    sample_img = cv2.imdecode(sample_arr, cv2.IMREAD_COLOR)
+
+    if base_img is None or sample_img is None:
+        return {"error": "Could not decode one or both images"}
+
+    # Relative darkness that ignores the regular grid pattern.
+    rel_fraction = compare_baseline_and_sample(base_img, sample_img)
+
+    # Optional: raw sample darkness using the single-image estimator.
+    sample_fraction = estimate_darkness(sample_img)
+    trypsin = darkness_to_trypsin(sample_fraction)
+
+    return {
+        "baseline_darkness_fraction": 0.0,
+        "baseline_darkness_percent": 0.0,
+        "sample_darkness_fraction": float(sample_fraction),
+        "sample_darkness_percent": round(sample_fraction * 100.0, 2),
+        "relative_darkness_fraction": float(rel_fraction),
+        "relative_darkness_percent": round(rel_fraction * 100.0, 2),
+        "trypsin_estimate": trypsin,
+        "units": "YOUR_UNITS_HERE",
+        "notes": "Relative darkness is computed only from pixels that become darker than the baseline within the inner grid.",
     }
