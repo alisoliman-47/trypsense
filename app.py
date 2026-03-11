@@ -408,9 +408,9 @@ def _extract_grid_region(img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     crop = gray[y1:y2, x1:x2]
     ch, cw = crop.shape
 
-    # Default: center circle mask in the crop.
+    # Default: center circle mask, inner radius only (exclude thick dark ring).
     cy, cx = ch // 2, cw // 2
-    r = min(ch, cw) * 0.35
+    r = min(ch, cw) * 0.35 * 0.75
     yy, xx = np.ogrid[:ch, :cw]
     base_mask = (yy - cy) ** 2 + (xx - cx) ** 2 <= r ** 2
 
@@ -430,10 +430,11 @@ def _extract_grid_region(img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         if circles is not None:
             circles = np.round(circles[0, :]).astype(int)
             c_x, c_y, c_r = circles[0]
-            # Slightly shrink the radius to avoid the bright outer ring.
-            c_r = int(c_r * 0.9)
+            # Use inner radius only: exclude the thick dark ring and outer edge.
+            # Only the grid-cell area counts (no ring, no grid lines in the metric).
+            c_r_inner = int(c_r * 0.75)
             yy2, xx2 = np.ogrid[:ch, :cw]
-            mask = (yy2 - c_y) ** 2 + (xx2 - c_x) ** 2 <= c_r ** 2
+            mask = (yy2 - c_y) ** 2 + (xx2 - c_x) ** 2 <= c_r_inner ** 2
             return crop, mask
     except Exception:
         # Fall back gracefully if anything goes wrong.
@@ -444,28 +445,36 @@ def _extract_grid_region(img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def estimate_darkness(img_bgr: np.ndarray) -> float:
     """
-    Single-image darkness estimate for the inner grid.
+    Darkness in the inner circular grid only, ignoring grid lines and the outer ring.
 
-    This is mostly for debugging. The preferred, grid-line‑invariant
-    metric is the relative darkness returned by compare_baseline_and_sample.
+    - Mask is shrunk so the thick dark ring around the grid is excluded.
+    - Strong blur washes out thin grid lines; only larger dark regions (spots) count.
+    - Only blobs above min_area count, so line-like structures are ignored.
     """
     crop, mask = _extract_grid_region(img_bgr)
     if crop.size == 0:
         return 0.0
 
-    crop_blur = cv2.GaussianBlur(crop, (5, 5), 0)
+    # Strong blur so grid lines (thin) blend into cell brightness.
+    k = 21
+    crop_blur = cv2.GaussianBlur(crop, (k, k), sigmaX=7, sigmaY=7)
     roi = crop_blur[mask]
     if roi.size == 0:
         return 0.0
 
-    # Use the bright end of the histogram as a reference background.
-    bright_percentile = np.percentile(roi, 95)
+    bright_percentile = np.percentile(roi, 92)
     std_estimate = np.std(roi)
-    threshold = bright_percentile - 2.0 * std_estimate
+    threshold = bright_percentile - 1.8 * std_estimate
     threshold = max(threshold, 0.0)
 
     dark_mask = (crop_blur < threshold) & mask
-    dark_pixels = int(np.count_nonzero(dark_mask))
+    dark_uint8 = np.where(dark_mask, 255, 0).astype(np.uint8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(dark_uint8)
+    min_area = 25
+    dark_pixels = 0
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            dark_pixels += stats[i, cv2.CC_STAT_AREA]
     total_pixels = int(np.count_nonzero(mask))
     if total_pixels == 0:
         return 0.0
